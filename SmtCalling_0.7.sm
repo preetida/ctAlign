@@ -1,0 +1,348 @@
+#Define the resources from the config file
+
+## Base name to prepend on all files
+name = config["name"]
+
+## For messaging
+email = config["email"]
+
+## Bed file of regions to analyze
+regionsForAnalysis = config["rA"]
+bed = config["bed"]
+
+## Panel of Normals
+#mpileup = config["mpileup"]
+
+## Bam files
+tumorBam = config["tBam"]
+normalBam = config["nBam"]
+
+## Threads and memory
+allThreads = int(config["threads"])
+halfThreads = int(round(allThreads/2,0))
+allMemory = config["memory"]
+allRam = int(round(float(config["allRam"])))
+
+## VCF variant filtering params
+minTumorAlignmentDepth = config["mtad"]
+minNormalAlignmentDepth = config["mnad"]
+minTumorAF = config["mtaf"]
+maxNormalAF = config["mnaf"]
+minTNRatio = config["mr"]
+minTNDiff = config["md"]
+minZScore = config["zscore"]
+
+## Apps
+useq="/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/USeq_9.2.0/Apps"
+picard = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/Picard/2.1.1/picard.jar"
+manta = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/manta-1.5.0.centos6_x86_64/bin"
+strelka = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/strelka-2.9.2.centos6_x86_64/bin/configureStrelkaSomaticWorkflow.py"
+gatk = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/GATK/3.7-0-gcfedb67/GenomeAnalysisTK.jar"
+htsLib = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/htslib-1.9/bin"
+lofreq = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/lofreq_star-2.1.2/bin/lofreq"
+lancet = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/lancet/lancet"
+samtools = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/samtools-1.9/bin/samtools"
+
+
+## Languages
+java= "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/Java/1.8.0_65/bin/java -jar -Djava.io.tmpdir=. "
+
+## References
+FastaDecoy= "/scratch/ucgd/lustre/common/data/Reference/GRCh38/human_g1k_v38_decoy_phix.fasta"
+indexFasta="/scratch/mammoth/serial/u0944235/A5578/upload_staging/uufs/chpc.utah.edu/common/HIPAA/u0028003/TNRunner/Indexes/B38IndexForBwa-0.7.17/hs38DH.fa"
+dbsnp = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/00-All.vcf.gz"
+cosmic = "/uufs/chpc.utah.edu/common/HIPAA/u0944235/BioApps2/Cosmic.hg38.vcf.gz"
+
+
+
+## File resources to check before launching
+requiredFiles = [regionsForAnalysis, tumorBam, normalBam, useq, picard, strelka, gatk, htsLib, lofreq, lancet, indexFasta, dbsnp, cosmic]
+
+############# Rules ##############
+
+rule CleanUp:
+    input:
+        name+ "_Consensus.filt.vcf.gz",
+        name+ "_MutectBams"
+    shell:
+        "rm -rf {name}_Strelka/ {name}/_MutectBams/ {name}_Mutect/ {name}_Lofreq/ {name}_StrelkaRegionFilter/ {name}_VCFBackgroundChecker/ && "
+        "echo [`date`] rule CleanUp: COMPLETE && echo"
+
+# Uses ls to check if all the required resources are present
+rule CheckResources:
+    output:
+        temp(name+ "_CheckResources.complete")
+    log:
+        name+ "_CheckResources.log"
+    shell:
+        "ls {requiredFiles} &> {log} && touch {output} && "
+        "echo [`date`] rule CheckResources: COMPLETE && echo"
+
+# Calls Strelka for tumor vs non matched control normal analysis
+
+rule Manta:
+    output:
+        dir = name+ "_Manta",
+        vcf= name+ "_Manta/results/variants/candidateSmallIndels.vcf.gz"
+    log:
+        name+ "_Manta.log"
+    threads:
+      allThreads
+    shell:
+      "rm -rf {output} &>> {log} && source ~/vp27/bin/activate && "
+      "{manta}/configManta.py --exome "
+      "--normalBam={normalBam} --tumorBam={tumorBam} --referenceFasta={indexFasta} "
+      "--runDir={output.dir} &>> {log} && "
+      "{output.dir}/runWorkflow.py -m local -g {allRam} -j {threads} "
+      "--quiet &>> {log} && deactivate &>> {log} "
+      "echo ['date'] rule Manta : COMPLETE && echo "
+
+rule Strelka:
+    input:
+        name+ "_Manta/results/variants/candidateSmallIndels.vcf.gz"
+    output:
+        dir = name+ "_Strelka",
+        #vcf1 = name+ "_Strelka/results/variants/somatic.indels.vcf",
+        #vcf2 = name+ "_Strelka/results/variants/somatic.snvs.vcf"
+    log:
+        name+ "_Strelka.log"
+    threads:
+        allThreads
+    shell:
+        "rm -rf {output.dir} && source ~/vp27/bin/activate && "
+        "{strelka} --exome --normalBam {normalBam} --tumorBam {tumorBam} "
+        "--referenceFasta {indexFasta} --indelCandidates={input} "
+        "--callRegions {regionsForAnalysis} --runDir {output.dir} &> {log} && "
+        "{output.dir}/runWorkflow.py -m local -g {allRam} -j {threads} "
+	"--quiet &>> {log} && deactivate &>> {log} && "
+        "echo ['date'] rule strelka2 : COMPLETE && echo "
+
+rule StrelkaPostProc:
+    input:
+        dir = name+ "_Strelka",
+        #vcf1 = name+ "_Strelka/results/variants/somatic.indels.vcf.gz",
+        #vcf2 = name+ "_Strelka/results/variants/somatic.snvs.vcf.gz"
+    output:
+        vcf = name+"_Strelka.raw.vcf.gz",
+        #dir = name+"_StrelkaVcfs"
+    log:
+        name+ "_StrelkaPostProc.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/VCFMerger -o {output.vcf} -v {input.dir}/results/variants/*.vcf.gz &> {log} && "
+        "echo [`date`] rule StrelkaPostProc: COMPLETE && echo"
+
+rule StrelkaRegionFilter:
+    input:
+        name+"_Strelka.raw.vcf.gz"
+    output:
+        dir = temp(name+ "_StrelkaRegionFilter"),
+        vcf = temp(name+ "_Strelka.regionFilt.vcf.gz")
+    log:
+        name+ "_StrelkaRegionFilter.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/VCFRegionFilter -v {input} -b {regionsForAnalysis} "
+        "-s {output.dir} &> {log} && "
+        "mv -f {output.dir}/*_int.vcf.gz {output.vcf} && "
+        "echo [`date`] rule StrelkaRegionFilter: COMPLETE && echo"
+
+rule StrelkaFilter:
+    input:
+        name+ "_Strelka.regionFilt.vcf.gz"
+    output:
+        vcf = name+ "_Strelka.filt.vcf.gz"
+    log:
+        name+ "_StrelkaFilter.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/StrelkaVCFParser -v {input} -t {minTumorAF} "
+        "-n {maxNormalAF} -u {minTumorAlignmentDepth} -o {minNormalAlignmentDepth} "
+        "-d {minTNDiff} -r {minTNRatio} &> {log} && "
+        "mv -f {name}_Strelka.regionFilt_Filtered.vcf.gz {output.vcf} && "
+        "echo [`date`] rule StrelkaFilter: COMPLETE && echo "
+
+rule Lofreq:
+    input:
+        name+ "_Strelka"
+    output:
+        dir= name+ "_Lofreq",
+        indels= name+ "_Lofreq/"+name+"_somatic_final.indels.vcf.gz",
+        snvs= name+ "_Lofreq/"+name+"_somatic_final.snvs.vcf.gz"
+    log:
+        name+ "_lofreq.log"
+    threads:
+        allThreads
+    shell:
+        "mkdir -p {output.dir} &> {log} && source ~/vp27/bin/activate && "
+	#"gunzip -c {regionsForAnalysis} > {output.dir}/regionsToAnalyze.bed && "
+        "{lofreq} somatic --tumor-mtc-alpha 10.0 --indel-tumor-mtc-alpha 0.5 --call-indels "
+        "-f {FastaDecoy} -o {name}_Lofreq/{name}_ "
+	"-n {normalBam} -t {tumorBam} --threads {threads} &>> {log} && "
+	"deactivate && "
+        "rm -rf {name}_Lofreq/*_relaxed.* {name}_Lofreq/*_raw.* {name}_Lofreq/*stringent.* &>> {log} && "
+        "echo [`date`] rule Lofreq: COMPLETE && echo "
+
+rule LofreqMerge:
+    input:
+        indels= name+ "_Lofreq/"+name+"_somatic_final.indels.vcf.gz",
+        snvs= name+ "_Lofreq/"+name+"_somatic_final.snvs.vcf.gz"
+    output:
+        name+"_Lofreq.raw.vcf.gz"
+    log:
+        name+ "_LofreqMerge.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/VCFMerger -v {name}_Lofreq -o {output} &> {log} && "
+        "echo [`date`] rule LofreqMerge: COMPLETE && echo "
+
+rule LofreqFilter:
+    input:
+        name+ "_Lofreq.raw.vcf.gz"
+    output:
+        name+"_Lofreq.filt.vcf.gz"
+    log:
+        name+ "_LofreqFilter.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/LofreqVCFParser -d {minTumorAlignmentDepth} -t {minTumorAF} "
+        "-a -v {input} &> {log} && "
+        "mv -f {name}_Lofreq.raw_Filtered.vcf.gz {output} &>> {log} && "
+        "echo [`date`] rule LofreqFilter: COMPLETE && echo "
+
+rule Lancet:
+    input:
+        name+ "_Lofreq"
+    output:
+    	dir= name+ "_Lancet",
+        vcf= name+"_Lancet/" + name+ "_Lancet.raw.vcf"
+    log:
+        name+ "_Lancet.log"
+    threads:
+        allThreads
+    shell:
+         "mkdir -p {output.dir} &> {log} && gunzip -c {regionsForAnalysis} > {output.dir}/regionsToAnalyze.bed && "
+	 "{lancet} --tumor {tumorBam} --normal {tumorBam} --ref {indexFasta} -B {output.dir}/regionsToAnalyze.bed "
+	 "--num-threads {threads} > {output.vcf} && "
+	 "echo [`date`] rule Lancet: COMPLETE && echo "
+
+rule Pileup:
+    input:
+	       name+ "_Lancet"
+    output:
+	       #dir= temp(name+ "_Pileup"),
+	       vcf= name+"_Pileup/" + name+ "_Pileup.vcf"
+    log:
+	       name+ "_Pileup.log"
+    threads:
+	       allThreads
+    shell:
+	       "{samtools} mpileup -B -q 20 -d 1000000 -f {indexFasta} -l {regionsForAnalysis} "
+	       "{normalBam} {tumorBam} > {output.vcf} &> {log} && "
+	       "echo [`date`] rule Pileup: COMPLETE && echo "
+
+rule Mutect:
+    input:
+        name+"_Pileup/" + name+ "_Pileup.vcf"
+    output:
+        dir= name+ "_Mutect",
+        vcf= name+"_Mutect.raw.vcf.gz",
+        bam= name+ "_Mutect/mutect.realigned.bam"
+    log:
+        name+ "_Mutect.log"
+    threads:
+        allThreads
+    shell:
+        "{java} -Xmx10G {useq}/GatkRunner -t {threads} -s {output.dir} -r {regionsForAnalysis} "
+        "-b -c '{java} -Xmx5G {gatk} -T MuTect2 -I:tumor {tumorBam} -I:normal {normalBam} -mbq 20 "
+        "-R {indexFasta} --dbsnp {dbsnp} --cosmic {cosmic} -dt NONE -drf DuplicateRead' &> {log} && "
+        "cat {output.dir}/gatk.raw.vcf | gzip > {output.vcf} && "
+        "echo [`date`] rule Mutect: COMPLETE && echo "
+
+rule SplitMutectBam:
+    input:
+        name+ "_Mutect/mutect.realigned.bam"
+    output:
+        name+ "_MutectBams"
+    log:
+        name+ "_SplitMutectBam.log"
+    threads:
+        halfThreads
+    shell:
+        "mkdir -p {output} && "
+        "{java} -Xmx10G -jar {picard} SplitSamByLibrary CREATE_INDEX=true "
+        "MAX_RECORDS_IN_RAM=5000000 TMP_DIR=. VALIDATION_STRINGENCY=SILENT I={input} "
+        "O={output} &> {log} && "
+        "echo [`date`] rule SplitMutectBam: COMPLETE "
+
+rule MutectFilter:
+    input:
+        name+"_Mutect.raw.vcf.gz"
+    output:
+        vcf = name+"_Mutect.filt.vcf.gz"
+    log:
+        name+ "_MutectFilter.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx10G {useq}/MutectVCFParser -v {input} -t {minTumorAF} "
+        "-n {maxNormalAF} -u {minTumorAlignmentDepth} -o {minNormalAlignmentDepth} "
+        "-d {minTNDiff} -r {minTNRatio} &> {log} && "
+        "cp -f {name}_Mutect.raw_Filtered.vcf.gz {output.vcf} && "
+        "echo [`date`] rule MutectFilter: COMPLETE && echo "
+
+rule VCFConsensus:
+    input:
+        mu= name+"_Mutect.filt.vcf.gz",
+        sc= name+"_Lofreq.filt.vcf.gz",
+        st= name+"_Strelka.filt.vcf.gz"
+	#lt= name+"_Lancet/" + name+ "_Lancet.vcf"
+    output:
+        name+"_Consensus.vcf.gz"
+    log:
+        name+"_VCFConsensus.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/VCFConsensus -p {input.mu} -s {input.st} -o {name}_tempCon.vcf.gz &> {log} && "
+	"{java} -Xmx{allMemory} {useq}/VCFConsensus -p {name}_tempCon.vcf.gz -s {input.sc} -o {output} &>> {log} && "
+	"rm -f {name}_temp2Con.vcf.gz && "
+        "echo [`date`] rule VCFConsensus: COMPLETE && echo "
+
+rule MultiSampleVCFFilter:
+    input:
+        name+"_Consensus.vcf.gz"
+    output:
+        name+ "_Consensus.filt.vcf"
+    log:
+        name+ "_MultiSampleVCFFilter.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/MultiSampleVCFFilter -v {input} -d {minZScore} -p {output} &> {log} && "
+        "echo [`date`] rule MultiSampleVCFFilter: COMPLETE && echo "
+
+rule VCFTabix:
+    input:
+        name+"_Consensus.filt.vcf"
+    output:
+        name+ "_Consensus.filt.vcf.gz"
+    log:
+        name+ "_VCFTabix.log"
+    threads:
+        halfThreads
+    shell:
+        "{java} -Xmx{allMemory} {useq}/VCFTabix -v . -t {htsLib} -f &> {log} && "
+        "echo [`date`] rule VCFTabix: COMPLETE && echo "
+
+
+############# Messaging ##############
+onerror:
+    shell( "dir=`pwd`; mail -s \"Failed: {name} ($dir)\" {email} < {log}; sleep 4s")
+onsuccess:
+    shell( "dir=`pwd`; mail -s \"Complete: {name} ($dir)\" {email} < {log}; sleep 4s")
